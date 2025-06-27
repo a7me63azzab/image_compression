@@ -166,20 +166,20 @@ class MainActivity : ComponentActivity() {
 //                                            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
 
 
-                                        val outBytes = withContext(Dispatchers.IO) {
-
-                                            val imageWidth =
-                                                calculateTargetWidthFromFile(tempFile, 512)
-
-                                            println("Size after 00000000-> $imageWidth")
-
-
-                                            ImageResizer.resizeGeneric(
-                                                bytes, imageWidth, 512,
-                                                getExifOrientation(tempFile),
-                                                3, 1, 1, 5
-                                            ) ?: return@withContext byteArrayOf()
-                                        }
+//                                        val outBytes = withContext(Dispatchers.IO) {
+//
+//                                            val imageWidth =
+//                                                calculateTargetWidthFromFile(tempFile, 512)
+//
+//                                            println("Size after 00000000-> $imageWidth")
+//
+//
+//                                            ImageResizer.resizeGeneric(
+//                                                bytes, imageWidth, 512,
+//                                                getExifOrientation(tempFile),
+//                                                3, 1, 1, 5
+//                                            ) ?: return@withContext byteArrayOf()
+//                                        }
 
 //                                        val outBytes = withContext(Dispatchers.IO) {
 //                                            ImageResizer.resize(
@@ -188,6 +188,14 @@ class MainActivity : ComponentActivity() {
 //
 //                                                ) ?: return@withContext byteArrayOf()
 //                                        }
+
+                                        val outBytes = withContext(Dispatchers.IO) {
+                                            ImageResizer.resizeLanczos(
+                                                bytes, 413, 531,
+                                                getExifOrientation(tempFile),
+
+                                                ) ?: return@withContext byteArrayOf()
+                                        }
 
 
 //                                        resizedBitmap = BitmapFactory.decodeByteArray(
@@ -236,7 +244,6 @@ class MainActivity : ComponentActivity() {
             (targetHeight * (opts.outHeight.toFloat() / opts.outWidth)).toInt()
         } else 0
     }
-
 
 
     @Composable

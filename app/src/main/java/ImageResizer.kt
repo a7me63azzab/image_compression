@@ -19,4 +19,11 @@ object ImageResizer {
         edgeMode: Int,
         filterMode: Int
     ): ByteArray?
+
+    @JvmStatic external fun resizeLanczos(
+        inputData: ByteArray,
+        newWidth: Int,
+        newHeight: Int,
+        orientation: Int,
+    ): ByteArray?
 }

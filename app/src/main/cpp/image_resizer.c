@@ -11,6 +11,7 @@
 #include "stb_image_write.h"
 
 #include <jni.h>
+#include <math.h>
 #include <stdlib.h>
 
 
@@ -64,6 +65,100 @@ static unsigned char *rotate_image(
         }
     }
     return out;
+}
+
+// Lanczos-3 kernel (a=3)
+static float lanczos_kernel(float x, float scale, void *user_data) {
+    const float a = 3.0f;
+    (void)scale; (void)user_data;
+    if (x < 0) x = -x;
+    if (x < a) {
+        float pix = M_PI * x;
+        return (sinf(pix) / pix) * (sinf(pix / a) / (pix / a));
+    }
+    return 0;
+}
+
+// Support radius for Lanczos-3
+static float lanczos_support(float scale, void *user_data) {
+    (void)scale; (void)user_data;
+    return 3.0f;
+}
+
+
+
+
+// JNI entry: resize with Lanczos-3 filter via extended API
+JNIEXPORT jbyteArray JNICALL
+Java_com_azzab_image_1compression_ImageResizer_resizeLanczos(
+        JNIEnv* env,
+        jclass clazz,
+        jbyteArray inputData,
+        jint newW,
+        jint newH,
+        jint orientation
+) {
+    // 1. Retrieve input bytes
+    jsize inLen = (*env)->GetArrayLength(env, inputData);
+    jbyte* inBytes = (*env)->GetByteArrayElements(env, inputData, NULL);
+
+    // 2. Decode image
+    int w, h, channels;
+    unsigned char* img = stbi_load_from_memory(
+            (unsigned char*)inBytes, inLen,
+            &w, &h, &channels, 0
+    );
+    (*env)->ReleaseByteArrayElements(env, inputData, inBytes, 0);
+    if (!img) return NULL;
+
+    // 3. Rotate if needed
+    int rw, rh;
+    unsigned char* rotated = rotate_image(img, w, h, channels, orientation, &rw, &rh);
+    stbi_image_free(img);
+    if (!rotated) return NULL;
+
+    // 4. Allocate buffer for output pixels
+    size_t bufSize = (size_t)newW * newH * channels;
+    unsigned char* outBuf = (unsigned char*)malloc(bufSize);
+    if (!outBuf) { free(rotated); return NULL; }
+
+    // 5. Initialize resize context
+    STBIR_RESIZE ctx;
+    stbir_resize_init(
+            &ctx,
+            rotated, rw, rh, 0,
+            outBuf, newW, newH, 0,
+            (stbir_pixel_layout)channels,
+            STBIR_TYPE_UINT8
+    );
+    // 6. Override filters with Lanczos callbacks
+    stbir_set_filter_callbacks(
+            &ctx,
+            lanczos_kernel, lanczos_support,
+            lanczos_kernel, lanczos_support
+    );
+
+    // 7. Execute resize
+    stbir_resize_extended(&ctx);
+    free(rotated);
+
+    // 8. Encode result to PNG in memory
+    int outLen;
+    unsigned char* png = stbi_write_png_to_mem(
+            outBuf,
+            newW * channels,
+            newW, newH,
+            channels,
+            &outLen
+    );
+    free(outBuf);
+    if (!png) return NULL;
+
+    // 9. Create and return Java byte[]
+    jbyteArray result = (*env)->NewByteArray(env, outLen);
+    (*env)->SetByteArrayRegion(env, result, 0, outLen, (jbyte*)png);
+    free(png);
+    return result;
 }
 
 
