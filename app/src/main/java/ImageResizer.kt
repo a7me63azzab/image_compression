@@ -25,5 +25,6 @@ object ImageResizer {
         newWidth: Int,
         newHeight: Int,
         orientation: Int,
+        quality: Int,
     ): ByteArray?
 }

@@ -193,6 +193,7 @@ class MainActivity : ComponentActivity() {
                                             ImageResizer.resizeLanczos(
                                                 bytes, 413, 531,
                                                 getExifOrientation(tempFile),
+                                                100
 
                                                 ) ?: return@withContext byteArrayOf()
                                         }
