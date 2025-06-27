@@ -5,6 +5,18 @@ object ImageResizer {
     @JvmStatic external fun resize(
         inputPngOrJpeg: ByteArray,
         newWidth: Int,
-        newHeight: Int
+        newHeight: Int,
+        orientation: Int
+    ): ByteArray?
+
+    @JvmStatic external fun resizeGeneric(
+        inputData: ByteArray,
+        newWidth: Int,
+        newHeight: Int,
+        orientation: Int,
+        pixelLayout: Int,
+        dataType: Int,
+        edgeMode: Int,
+        filterMode: Int
     ): ByteArray?
 }

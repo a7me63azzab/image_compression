@@ -6,6 +6,7 @@ import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.ExifInterface
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
@@ -106,6 +107,21 @@ class MainActivity : ComponentActivity() {
                             override fun onError(exc: ImageCaptureException) = Unit
                             override fun onImageSaved(result: ImageCapture.OutputFileResults) {
                                 scope.launch(Dispatchers.IO) {
+
+                                    val exif = ExifInterface(photoFile.absolutePath)
+                                    val ori = exif.getAttributeInt(
+                                        ExifInterface.TAG_ORIENTATION,
+                                        ExifInterface.ORIENTATION_NORMAL
+                                    )
+                                    // Map to STB-friendly codes:
+                                    val orientationCode = when (ori) {
+                                        ExifInterface.ORIENTATION_ROTATE_90    -> 6
+                                        ExifInterface.ORIENTATION_ROTATE_180   -> 3
+                                        ExifInterface.ORIENTATION_ROTATE_270   -> 8
+                                        else                                  -> 1
+                                    }
+
+
                                     // Load and save original
                                     originalBitmap = BitmapFactory.decodeFile(photoFile.absolutePath)
                                     originalBitmap?.let { bmp ->
@@ -114,7 +130,13 @@ class MainActivity : ComponentActivity() {
 
                                     // Resize via JNI
                                     val inputBytes = photoFile.readBytes()
-                                    val outBytes = ImageResizer.resize(inputBytes, 800, 600)
+
+                                //  val targetHieght =  originalBitmap!!.calcTargetHieght(413)
+
+                                    val targetHieght =  originalBitmap!!.getHeightForWidth(413)
+
+                                  //  val outBytes = ImageResizer.resize(inputBytes, 600, 800,orientationCode)
+                                    val outBytes = ImageResizer.resizeGeneric(inputBytes, 413, targetHieght,orientationCode,3,1,1,4)
                                     outBytes?.let {
                                         resizedBitmap = BitmapFactory.decodeByteArray(it, 0, it.size)
                                         resizedBitmap?.let { bmp ->
@@ -158,6 +180,19 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    fun Bitmap.calcTargetSize(minWidth: Int, minHeight: Int): Pair<Int, Int> {
+        val scale = maxOf(1f, minOf(width.toFloat() / minWidth, height.toFloat() / minHeight))
+        return (width  / scale).toInt() to (height / scale).toInt()
+    }
+
+    fun Bitmap.calcTargetHieght(minWidth: Int): Int {
+        val ratio = height/width
+        return minWidth * ratio
+    }
+
+    fun Bitmap.getHeightForWidth(targetWidth: Int): Int =
+        (height.toFloat() * targetWidth / width).toInt()
 
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)

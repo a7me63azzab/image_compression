@@ -1,50 +1,173 @@
 #define STB_IMAGE_IMPLEMENTATION
+
 #include "stb_image.h"
 
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
+
 #include "stb_image_resize2.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
+
 #include "stb_image_write.h"
 
 #include <jni.h>
 #include <stdlib.h>
 
 
+// Rotate buffer by EXIF orientation (1=normal,3=180,6=90CW,8=270CW)
+static unsigned char *rotate_image(
+        const unsigned char *in,
+        int w, int h,
+        int channels,
+        int orientation,
+        int *outW,
+        int *outH
+) {
+    int i, x, y, c;
+    if (orientation == 6) {
+        *outW = h;
+        *outH = w;
+    } else if (orientation == 8) {
+        *outW = h;
+        *outH = w;
+    } else {
+        *outW = w;
+        *outH = h;
+    }
+    unsigned char *out = malloc((*outW) * (*outH) * channels);
+    if (!out) return NULL;
 
-
-
+    for (y = 0; y < h; ++y) {
+        for (x = 0; x < w; ++x) {
+            for (c = 0; c < channels; ++c) {
+                unsigned char v = in[(y * w + x) * channels + c];
+                int tx, ty;
+                switch (orientation) {
+                    case 3: // 180
+                        tx = w - x - 1;
+                        ty = h - y - 1;
+                        break;
+                    case 6: // 90 CW
+                        tx = h - y - 1;
+                        ty = x;
+                        break;
+                    case 8: // 270 CW
+                        tx = y;
+                        ty = w - x - 1;
+                        break;
+                    default: // no rotate
+                        tx = x;
+                        ty = y;
+                }
+                out[(ty * (*outW) + tx) * channels + c] = v;
+            }
+        }
+    }
+    return out;
+}
 
 
 JNIEXPORT jbyteArray JNICALL
 Java_com_azzab_image_1compression_ImageResizer_resize(JNIEnv *env, jclass clazz,
-                                         jbyteArray inputData,
-                                         jint newW, jint newH) {
-    // 1. Get raw input bytes
-    jbyte* inBytes = (*env)->GetByteArrayElements(env, inputData, NULL);
+                                                      jbyteArray inputData,
+                                                      jint newW, jint newH, jint orientation) {
+    // 1) Load input bytes
     jsize inLen = (*env)->GetArrayLength(env, inputData);
+    jbyte *inBytes = (*env)->GetByteArrayElements(env, inputData, NULL);
 
-    // 2. Decode from memory
+    // 2) Decode image
     int w, h, channels;
-    unsigned char* in = stbi_load_from_memory(
-            (unsigned char*)inBytes, inLen, &w, &h, &channels, 0);
+    unsigned char *img = stbi_load_from_memory(
+            (unsigned char *) inBytes, inLen, &w, &h, &channels, 0);
     (*env)->ReleaseByteArrayElements(env, inputData, inBytes, 0);
-    if (!in) return NULL;
+    if (!img) return NULL;
 
-    // 3. Resize
-    unsigned char* out = stbir_resize_uint8_linear(
-            in, w, h, 0, NULL, newW, newH, 0, (stbir_pixel_layout)channels);
-    stbi_image_free(in);
-    if (!out) return NULL;
+    // 3) Rotate if needed
+    int rw, rh;
+    unsigned char *rotated = rotate_image(img, w, h, channels, orientation, &rw, &rh);
+    stbi_image_free(img);
+    if (!rotated) return NULL;
 
-    // 4. Encode to PNG in-memory
+    // 4) Resize
+    unsigned char *resized = stbir_resize_uint8_linear(
+            rotated, rw, rh, 0,
+            NULL, newW, newH, 0,
+            (stbir_pixel_layout) channels);
+    free(rotated);
+    if (!resized) return NULL;
+
+    // 5) Encode PNG
     int outLen;
-    unsigned char* png = stbi_write_png_to_mem(
-            out, newW * channels, newW, newH, channels, &outLen);
-    free(out);
+    unsigned char *png = stbi_write_png_to_mem(
+            resized, newW * channels, newW, newH, channels, &outLen);
+    free(resized);
     if (!png) return NULL;
 
-    // 5. Copy into a Java byte[]
+    // 6) Return byte[]
+    jbyteArray result = (*env)->NewByteArray(env, outLen);
+    (*env)->SetByteArrayRegion(env, result, 0, outLen, (jbyte *) png);
+    free(png);
+    return result;
+}
+
+
+// JNI: com.example.imageresizer.ImageResizer.resizeGeneric(
+//      ByteArray inputData, int newW, int newH, int orientation,
+//      int pixel_layout, int datatype, int edge_mode, int filter_mode)
+JNIEXPORT jbyteArray JNICALL
+Java_com_azzab_image_1compression_ImageResizer_resizeGeneric(
+        JNIEnv* env,
+        jclass clazz,
+        jbyteArray inputData,
+        jint newW,
+        jint newH,
+        jint orientation,
+        jint pixel_layout,
+        jint datatype,
+        jint edge_mode,
+        jint filter_mode
+) {
+    // 1) Get input bytes
+    jsize inLen = (*env)->GetArrayLength(env, inputData);
+    jbyte* inBytes = (*env)->GetByteArrayElements(env, inputData, NULL);
+
+    // 2) Decode image
+    int w, h, channels;
+    unsigned char* img = stbi_load_from_memory((unsigned char*)inBytes, inLen, &w, &h, &channels, 0);
+    (*env)->ReleaseByteArrayElements(env, inputData, inBytes, 0);
+    if (!img) return NULL;
+
+    // 3) Rotate if needed
+    int rw, rh;
+    unsigned char* rotated = rotate_image(img, w, h, channels, orientation, &rw, &rh);
+    stbi_image_free(img);
+    if (!rotated) return NULL;
+
+    // 4) Allocate output buffer
+    size_t outStride = 0;
+    unsigned char* outBuf = malloc(newW * newH * channels);
+    if (!outBuf) { free(rotated); return NULL; }
+
+    // 5) Call medium-complexity API
+    stbir_resize(
+            rotated,              // input_pixels
+            rw, rh, 0,            // input_w, input_h, input_stride
+            outBuf,               // output_pixels
+            newW, newH, outStride, // output_w, output_h, output_stride
+            (stbir_pixel_layout)pixel_layout,
+            (stbir_datatype)datatype,
+            (stbir_edge)edge_mode,
+            (stbir_filter)filter_mode
+    );
+    free(rotated);
+
+    // 6) Encode to PNG
+    int outLen;
+    unsigned char* png = stbi_write_png_to_mem(outBuf, newW * channels, newW, newH, channels, &outLen);
+    free(outBuf);
+    if (!png) return NULL;
+
+    // 7) Return byte[]
     jbyteArray result = (*env)->NewByteArray(env, outLen);
     (*env)->SetByteArrayRegion(env, result, 0, outLen, (jbyte*)png);
     free(png);
