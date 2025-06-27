@@ -190,10 +190,9 @@ class MainActivity : ComponentActivity() {
 //                                        }
 
                                         val outBytes = withContext(Dispatchers.IO) {
-                                            ImageResizer.resizeLanczos(
+                                            ImageResizer.resize(
                                                 bytes, 413, 531,
                                                 getExifOrientation(tempFile),
-                                                100
 
                                                 ) ?: return@withContext byteArrayOf()
                                         }
