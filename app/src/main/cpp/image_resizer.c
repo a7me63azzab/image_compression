@@ -13,6 +13,11 @@
 #include <jni.h>
 #include <math.h>
 #include <stdlib.h>
+#include <pthread.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <stdbool.h>
+#include <android/log.h>
 
 
 // Rotate buffer by EXIF orientation (1=normal,3=180,6=90CW,8=270CW)
@@ -67,186 +72,186 @@ static unsigned char *rotate_image(
     return out;
 }
 
-// Lanczos-3 kernel (a=3)
+
+
+//---------------- enhance performancd
+
+// Lanczos callbacks and support
 static float lanczos_kernel(float x, float scale, void *user_data) {
     const float a = 3.0f;
-    (void)scale; (void)user_data;
+    (void) scale;
+    (void) user_data;
     if (x < 0) x = -x;
     if (x < a) {
-        float pix = M_PI * x;
+        float pix = (float) M_PI * x;
         return (sinf(pix) / pix) * (sinf(pix / a) / (pix / a));
     }
-    return 0;
+    return 0.0f;
 }
 
-// Support radius for Lanczos-3
 static float lanczos_support(float scale, void *user_data) {
-    (void)scale; (void)user_data;
+    (void) scale;
+    (void) user_data;
     return 3.0f;
 }
 
+// Shared buffer reuse
+static unsigned char *sharedOutBuf = NULL;
+static int sharedW = 0, sharedH = 0, sharedCh = 0;
+static STBIR_RESIZE sharedCtx;
+static pthread_mutex_t initMutex = PTHREAD_MUTEX_INITIALIZER;
 
+// JPEG callback accumulator
+typedef struct {
+    unsigned char *buf;
+    int size;
+} mem_buf;
 
-// Buffer accumulator for JPEG output
-typedef struct { unsigned char* buf; int size; } mem_buf;
-
-static void write_jpg_callback(void* context, void* data, int size) {
-    mem_buf* m = (mem_buf*)context;
-    unsigned char* newBuf = (unsigned char*)realloc(m->buf, m->size + size);
-    if (!newBuf) return;
-    m->buf = newBuf;
-    memcpy(m->buf + m->size, data, size);
-    m->size += size;
+static void write_jpg_callback(void *ctx, void *data, int sz) {
+    mem_buf *m = (mem_buf *) ctx;
+    unsigned char *nb = (unsigned char *) realloc(m->buf, m->size + sz);
+    if (!nb) return;
+    m->buf = nb;
+    memcpy(m->buf + m->size, data, sz);
+    m->size += sz;
 }
 
-// JNI entry: resize with Lanczos-3 filter and output JPEG via callback
 JNIEXPORT jbyteArray JNICALL
 Java_com_azzab_image_1compression_ImageResizer_resizeLanczos(
-        JNIEnv* env,
-        jclass clazz,
-        jbyteArray inputData,
-        jint newW,
-        jint newH,
-        jint orientation,
-        jint quailty
+        JNIEnv *env, jclass clazz,
+        jbyteArray inputData, jint newW, jint newH, jint orientation, jint quality
 ) {
-    // 1. Retrieve input bytes
+    // Decode input
     jsize inLen = (*env)->GetArrayLength(env, inputData);
-    jbyte* inBytes = (*env)->GetByteArrayElements(env, inputData, NULL);
-
-    // 2. Decode image
+    jbyte *inBytes = (*env)->GetByteArrayElements(env, inputData, NULL);
     int w, h, channels;
-    unsigned char* img = stbi_load_from_memory(
-            (unsigned char*)inBytes, inLen, &w, &h, &channels, 0
-    );
+    unsigned char *img = stbi_load_from_memory((unsigned char *) inBytes, inLen, &w, &h, &channels,
+                                               0);
     (*env)->ReleaseByteArrayElements(env, inputData, inBytes, 0);
     if (!img) return NULL;
 
-    // 3. Rotate if needed
+    // Rotate if needed
+    int rw, rh;
+    unsigned char *rotated = rotate_image(img, w, h, channels, orientation, &rw, &rh);
+    stbi_image_free(img);
+    if (!rotated) return NULL;
+
+    // Buffer and context reuse
+    pthread_mutex_lock(&initMutex);
+    if (!sharedOutBuf || sharedW != newW || sharedH != newH || sharedCh != channels) {
+        free(sharedOutBuf);
+        sharedW = newW;
+        sharedH = newH;
+        sharedCh = channels;
+        sharedOutBuf = malloc((size_t) newW * newH * channels);
+    }
+    memset(sharedOutBuf, 0, (size_t) newW * newH * channels);
+    stbir_resize_init(
+            &sharedCtx,
+            rotated, rw, rh, 0,
+            sharedOutBuf, newW, newH, 0,
+            (stbir_pixel_layout) channels,
+            STBIR_TYPE_UINT8
+    );
+    stbir_set_filter_callbacks(&sharedCtx,
+                               lanczos_kernel, lanczos_support,
+                               lanczos_kernel, lanczos_support);
+    pthread_mutex_unlock(&initMutex);
+
+    // Single-threaded resize
+    stbir_resize_extended(&sharedCtx);
+    free(rotated);
+
+    // Encode to JPEG
+    mem_buf mb = {NULL, 0};
+    stbi_write_jpg_to_func(write_jpg_callback, &mb,
+                           newW, newH, channels,
+                           sharedOutBuf, quality);
+    if (!mb.buf) return NULL;
+
+    // Return byte[]
+    jbyteArray out = (*env)->NewByteArray(env, mb.size);
+    (*env)->SetByteArrayRegion(env, out, 0, mb.size, (jbyte *) mb.buf);
+    free(mb.buf);
+    return out;
+}
+
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_azzab_image_1compression_ImageResizer_resizeLanczosToSize(
+        JNIEnv* env, jclass clazz,
+        jbyteArray inputData,
+        jint newW, jint newH,
+        jint targetKb,
+        jint minQuality,
+        jint orientation
+) {
+    // 1. Decode input
+    jsize inLen = (*env)->GetArrayLength(env, inputData);
+    jbyte* inBytes = (*env)->GetByteArrayElements(env, inputData, NULL);
+    int w,h,channels;
+    unsigned char* img = stbi_load_from_memory((unsigned char*)inBytes, inLen, &w, &h, &channels, 0);
+    (*env)->ReleaseByteArrayElements(env, inputData, inBytes, 0);
+    if (!img) return NULL;
+
+    // 2. Rotate if needed
     int rw, rh;
     unsigned char* rotated = rotate_image(img, w, h, channels, orientation, &rw, &rh);
     stbi_image_free(img);
     if (!rotated) return NULL;
 
-    // 4. Allocate buffer for resized pixels
-    size_t bufSize = (size_t)newW * newH * channels;
-    unsigned char* outBuf = (unsigned char*)malloc(bufSize);
-    if (!outBuf) { free(rotated); return NULL; }
-
-    // 5. Initialize STB resize context
-    STBIR_RESIZE ctx;
-    stbir_resize_init(
-            &ctx,
-            rotated, rw, rh, 0,
-            outBuf, newW, newH, 0,
-            (stbir_pixel_layout)channels,
-            STBIR_TYPE_UINT8
+    // 3. Buffer reuse and init (same as resizeLanczos)
+    pthread_mutex_lock(&initMutex);
+    if (!sharedOutBuf || sharedW!=newW || sharedH!=newH || sharedCh!=channels) {
+        free(sharedOutBuf);
+        sharedW=newW; sharedH=newH; sharedCh=channels;
+        sharedOutBuf = malloc((size_t)newW * newH * channels);
+    }
+    memset(sharedOutBuf, 0, (size_t)newW * newH * channels);
+    stbir_resize_init(&sharedCtx,
+                      rotated, rw, rh, 0,
+                      sharedOutBuf, newW, newH, 0,
+                      (stbir_pixel_layout)channels,
+                      STBIR_TYPE_UINT8
     );
-    // 6. Override filters with Lanczos callbacks
-    stbir_set_filter_callbacks(
-            &ctx,
-            lanczos_kernel, lanczos_support,
-            lanczos_kernel, lanczos_support
-    );
+    stbir_set_filter_callbacks(&sharedCtx,
+                               lanczos_kernel, lanczos_support,
+                               lanczos_kernel, lanczos_support);
+    pthread_mutex_unlock(&initMutex);
 
-    // 7. Perform resize
-    stbir_resize_extended(&ctx);
+    // 4. Resize
+    stbir_resize_extended(&sharedCtx);
     free(rotated);
 
-    // 8. Encode result to JPEG via callback
-    mem_buf mb = { NULL, 0 };
-    stbi_write_jpg_to_func(
-            write_jpg_callback,
-            &mb,
-            newW, newH,
-            channels,
-            outBuf,
-            quailty /* quality */
-    );
-    free(outBuf);
+    // 5. Iterative JPEG encode to meet size
+    mem_buf mb = {NULL,0};
+    int quality = 100;
+    int targetBytes = targetKb * 1024;
+    while (true) {
+        free(mb.buf); mb.buf = NULL; mb.size = 0;
+        stbi_write_jpg_to_func(write_jpg_callback, &mb,
+                               newW, newH, channels,
+                               sharedOutBuf, quality);
+        // log quality and current size in KB
+        __android_log_print(ANDROID_LOG_INFO, "ImageResizer", "Iteration: quality=%d, size=%d KB", quality, mb.size/1024);
+        if (!mb.buf) break;
+        if (mb.size <= targetBytes || quality <= minQuality) break;
+        quality -= 5;
+        if (quality < minQuality) quality = minQuality;
+    }
     if (!mb.buf) return NULL;
 
-    // 9. Create and return Java byte[]
-    jbyteArray result = (*env)->NewByteArray(env, mb.size);
-    (*env)->SetByteArrayRegion(env, result, 0, mb.size, (jbyte*)mb.buf);
+    __android_log_print(ANDROID_LOG_INFO, "ImageResizer final", "Iteration: quality=%d, size=%d KB", quality, mb.size/1024);
+
+    // 6. Return byte[]
+    jbyteArray outArr = (*env)->NewByteArray(env, mb.size);
+    (*env)->SetByteArrayRegion(env, outArr, 0, mb.size, (jbyte*)mb.buf);
     free(mb.buf);
-    return result;
+    return outArr;
 }
 
 
-// JNI entry: resize with Lanczos-3 filter via extended API
-//JNIEXPORT jbyteArray JNICALL
-//Java_com_azzab_image_1compression_ImageResizer_resizeLanczos(
-//        JNIEnv* env,
-//        jclass clazz,
-//        jbyteArray inputData,
-//        jint newW,
-//        jint newH,
-//        jint orientation
-//) {
-//    // 1. Retrieve input bytes
-//    jsize inLen = (*env)->GetArrayLength(env, inputData);
-//    jbyte* inBytes = (*env)->GetByteArrayElements(env, inputData, NULL);
-//
-//    // 2. Decode image
-//    int w, h, channels;
-//    unsigned char* img = stbi_load_from_memory(
-//            (unsigned char*)inBytes, inLen,
-//            &w, &h, &channels, 0
-//    );
-//    (*env)->ReleaseByteArrayElements(env, inputData, inBytes, 0);
-//    if (!img) return NULL;
-//
-//    // 3. Rotate if needed
-//    int rw, rh;
-//    unsigned char* rotated = rotate_image(img, w, h, channels, orientation, &rw, &rh);
-//    stbi_image_free(img);
-//    if (!rotated) return NULL;
-//
-//    // 4. Allocate buffer for output pixels
-//    size_t bufSize = (size_t)newW * newH * channels;
-//    unsigned char* outBuf = (unsigned char*)malloc(bufSize);
-//    if (!outBuf) { free(rotated); return NULL; }
-//
-//    // 5. Initialize resize context
-//    STBIR_RESIZE ctx;
-//    stbir_resize_init(
-//            &ctx,
-//            rotated, rw, rh, 0,
-//            outBuf, newW, newH, 0,
-//            (stbir_pixel_layout)channels,
-//            STBIR_TYPE_UINT8
-//    );
-//    // 6. Override filters with Lanczos callbacks
-//    stbir_set_filter_callbacks(
-//            &ctx,
-//            lanczos_kernel, lanczos_support,
-//            lanczos_kernel, lanczos_support
-//    );
-//
-//    // 7. Execute resize
-//    stbir_resize_extended(&ctx);
-//    free(rotated);
-//
-//    // 8. Encode result to PNG in memory
-//    int outLen;
-//    unsigned char* png = stbi_write_png_to_mem(
-//            outBuf,
-//            newW * channels,
-//            newW, newH,
-//            channels,
-//            &outLen
-//    );
-//    free(outBuf);
-//    if (!png) return NULL;
-//
-//    // 9. Create and return Java byte[]
-//    jbyteArray result = (*env)->NewByteArray(env, outLen);
-//    (*env)->SetByteArrayRegion(env, result, 0, outLen, (jbyte*)png);
-//    free(png);
-//    return result;
-//}
-
+//-----------------
 
 JNIEXPORT jbyteArray JNICALL
 Java_com_azzab_image_1compression_ImageResizer_resize(JNIEnv *env, jclass clazz,
@@ -297,7 +302,7 @@ Java_com_azzab_image_1compression_ImageResizer_resize(JNIEnv *env, jclass clazz,
 //      int pixel_layout, int datatype, int edge_mode, int filter_mode)
 JNIEXPORT jbyteArray JNICALL
 Java_com_azzab_image_1compression_ImageResizer_resizeGeneric(
-        JNIEnv* env,
+        JNIEnv *env,
         jclass clazz,
         jbyteArray inputData,
         jint newW,
@@ -310,24 +315,28 @@ Java_com_azzab_image_1compression_ImageResizer_resizeGeneric(
 ) {
     // 1) Get input bytes
     jsize inLen = (*env)->GetArrayLength(env, inputData);
-    jbyte* inBytes = (*env)->GetByteArrayElements(env, inputData, NULL);
+    jbyte *inBytes = (*env)->GetByteArrayElements(env, inputData, NULL);
 
     // 2) Decode image
     int w, h, channels;
-    unsigned char* img = stbi_load_from_memory((unsigned char*)inBytes, inLen, &w, &h, &channels, 0);
+    unsigned char *img = stbi_load_from_memory((unsigned char *) inBytes, inLen, &w, &h, &channels,
+                                               0);
     (*env)->ReleaseByteArrayElements(env, inputData, inBytes, 0);
     if (!img) return NULL;
 
     // 3) Rotate if needed
     int rw, rh;
-    unsigned char* rotated = rotate_image(img, w, h, channels, orientation, &rw, &rh);
+    unsigned char *rotated = rotate_image(img, w, h, channels, orientation, &rw, &rh);
     stbi_image_free(img);
     if (!rotated) return NULL;
 
     // 4) Allocate output buffer
     size_t outStride = 0;
-    unsigned char* outBuf = malloc(newW * newH * channels);
-    if (!outBuf) { free(rotated); return NULL; }
+    unsigned char *outBuf = malloc(newW * newH * channels);
+    if (!outBuf) {
+        free(rotated);
+        return NULL;
+    }
 
     // 5) Call medium-complexity API
     stbir_resize(
@@ -335,22 +344,23 @@ Java_com_azzab_image_1compression_ImageResizer_resizeGeneric(
             rw, rh, 0,            // input_w, input_h, input_stride
             outBuf,               // output_pixels
             newW, newH, outStride, // output_w, output_h, output_stride
-            (stbir_pixel_layout)pixel_layout,
-            (stbir_datatype)datatype,
-            (stbir_edge)edge_mode,
-            (stbir_filter)filter_mode
+            (stbir_pixel_layout) pixel_layout,
+            (stbir_datatype) datatype,
+            (stbir_edge) edge_mode,
+            (stbir_filter) filter_mode
     );
     free(rotated);
 
     // 6) Encode to PNG
     int outLen;
-    unsigned char* png = stbi_write_png_to_mem(outBuf, newW * channels, newW, newH, channels, &outLen);
+    unsigned char *png = stbi_write_png_to_mem(outBuf, newW * channels, newW, newH, channels,
+                                               &outLen);
     free(outBuf);
     if (!png) return NULL;
 
     // 7) Return byte[]
     jbyteArray result = (*env)->NewByteArray(env, outLen);
-    (*env)->SetByteArrayRegion(env, result, 0, outLen, (jbyte*)png);
+    (*env)->SetByteArrayRegion(env, result, 0, outLen, (jbyte *) png);
     free(png);
     return result;
 }

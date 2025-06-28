@@ -7,5 +7,11 @@ add_library(imageresizer SHARED
 
 find_library(log-lib log)
 
+target_compile_options(imageresizer PUBLIC
+        -O3                # optimize aggressively
+        -funroll-loops     # unroll loops
+        -ffast-math        # allow faster math approximations
+        -march=armv8-a+simd  # enable ARM NEON on arm64
+)
 target_include_directories(imageresizer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(imageresizer PRIVATE ${log-lib})

@@ -10,6 +10,7 @@ import android.media.ExifInterface
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -42,6 +43,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.Executors
+import kotlin.system.measureTimeMillis
 
 
 class MainActivity : ComponentActivity() {
@@ -189,14 +191,39 @@ class MainActivity : ComponentActivity() {
 //                                                ) ?: return@withContext byteArrayOf()
 //                                        }
 
-                                        val outBytes = withContext(Dispatchers.IO) {
-                                            ImageResizer.resizeLanczos(
-                                                bytes, 413, 531,
-                                                getExifOrientation(tempFile),
-                                                100
+//                                        val outBytes = withContext(Dispatchers.IO) {
+//                                            ImageResizer.resizeLanczos(
+//                                                bytes, 413, 531,
+//                                                getExifOrientation(tempFile),
+//                                                100
+//
+//                                                ) ?: return@withContext byteArrayOf()
+//                                        }
 
+                                        var outBytes = byteArrayOf()
+                                        val elapsedMs = measureTimeMillis {
+//                                            outBytes = withContext(Dispatchers.IO) {
+//                                                ImageResizer.resizeLanczos(
+//                                                    bytes, 413, 531,
+//                                                    getExifOrientation(tempFile),
+//                                                    100
+//                                                ) ?: return@withContext byteArrayOf()
+//                                            }
+
+                                            outBytes = withContext(Dispatchers.IO) {
+                                                ImageResizer.resizeLanczosToSize(
+                                                    bytes, 413, 531,
+                                                    20,
+                                                    70,
+                                                    getExifOrientation(tempFile),
                                                 ) ?: return@withContext byteArrayOf()
+                                            }
                                         }
+                                        val elapsedSec = elapsedMs / 1_000.0
+                                        Log.d(
+                                            "ResizeTimer",
+                                            "resizeLanczos took $elapsedSec seconds"
+                                        )
 
 
 //                                        resizedBitmap = BitmapFactory.decodeByteArray(
